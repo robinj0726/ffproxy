@@ -1,8 +1,12 @@
 package proxy
 
 import (
+	"bufio"
+	"io"
 	"log"
 	"net"
+	"net/http"
+	"strings"
 )
 
 // Server represents the proxy server
@@ -25,7 +29,7 @@ func (s *Server) Start() error {
 	}
 	defer listener.Close()
 
-	log.Printf("Listening on %s", s.ListenAddr)
+	log.Printf("HTTP Proxy listening on %s", s.ListenAddr)
 
 	for {
 		conn, err := listener.Accept()
@@ -39,20 +43,91 @@ func (s *Server) Start() error {
 }
 
 // handleConnection processes an individual client connection
-func (s *Server) handleConnection(conn net.Conn) {
-	defer conn.Close()
+func (s *Server) handleConnection(clientConn net.Conn) {
+	defer clientConn.Close()
 
-	log.Printf("New connection from %s", conn.RemoteAddr().String())
+	log.Printf("New connection from %s", clientConn.RemoteAddr().String())
 
-	// Read the first byte to determine the protocol
-	buf := make([]byte, 1)
-	_, err := conn.Read(buf)
+	reader := bufio.NewReader(clientConn)
+
+	// Read the HTTP request
+	req, err := http.ReadRequest(reader)
 	if err != nil {
-		log.Printf("Error reading from connection: %v", err)
+		log.Printf("Error reading request: %v", err)
 		return
 	}
 
-	// TODO: Implement protocol-specific handling based on the first byte
-	// For now, just echo back the received data
-	conn.Write(buf)
+	log.Printf("Received request: %s %s %s", req.Method, req.Host, req.URL.String())
+
+	// Handle CONNECT method differently (for HTTPS)
+	if req.Method == http.MethodConnect {
+		s.handleHTTPS(clientConn, req)
+		return
+	}
+
+	// For regular HTTP requests
+	s.handleHTTP(clientConn, req)
+}
+
+// handleHTTP handles regular HTTP requests
+func (s *Server) handleHTTP(clientConn net.Conn, req *http.Request) {
+	// Ensure the request URL is absolute
+	if !req.URL.IsAbs() {
+		req.URL.Scheme = "http"
+		req.URL.Host = req.Host
+	}
+
+	// Create a connection to the target server
+	targetConn, err := net.Dial("tcp", req.Host)
+	if err != nil {
+		log.Printf("Error connecting to target: %v", err)
+		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+		return
+	}
+	defer targetConn.Close()
+
+	// Forward the modified request to the target
+	err = req.Write(targetConn)
+	if err != nil {
+		log.Printf("Error writing to target: %v", err)
+		return
+	}
+
+	// Copy the response back to the client
+	_, err = io.Copy(clientConn, targetConn)
+	if err != nil {
+		log.Printf("Error copying response: %v", err)
+	}
+}
+
+// handleHTTPS handles HTTPS CONNECT requests
+func (s *Server) handleHTTPS(clientConn net.Conn, req *http.Request) {
+	// Connect to the target server
+	targetConn, err := net.Dial("tcp", req.Host)
+	if err != nil {
+		log.Printf("Error connecting to target: %v", err)
+		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+		return
+	}
+	defer targetConn.Close()
+
+	// Send 200 OK to the client to indicate tunnel established
+	_, err = clientConn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+	if err != nil {
+		log.Printf("Error writing CONNECT response: %v", err)
+		return
+	}
+
+	// Start bidirectional copy
+	go func() {
+		_, err := io.Copy(targetConn, clientConn)
+		if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+			log.Printf("Error copying to target: %v", err)
+		}
+	}()
+
+	_, err = io.Copy(clientConn, targetConn)
+	if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+		log.Printf("Error copying to client: %v", err)
+	}
 }

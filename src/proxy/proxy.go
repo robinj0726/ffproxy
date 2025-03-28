@@ -57,6 +57,13 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 		return
 	}
 
+	// Check if the request is trying to proxy to itself
+	if req.Host == s.ListenAddr || strings.HasPrefix(req.Host, "localhost") {
+		log.Printf("Rejecting self-proxy request to %s", req.Host)
+		clientConn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
+		return
+	}
+
 	log.Printf("Received request: %s %s %s", req.Method, req.Host, req.URL.String())
 
 	// Handle CONNECT method differently (for HTTPS)

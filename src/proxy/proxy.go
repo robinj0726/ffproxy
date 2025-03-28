@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 // Server represents the proxy server
@@ -54,13 +55,6 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	req, err := http.ReadRequest(reader)
 	if err != nil {
 		log.Printf("Error reading request: %v", err)
-		return
-	}
-
-	// Check if the request is trying to proxy to itself
-	if req.Host == s.ListenAddr || strings.HasPrefix(req.Host, "localhost") {
-		log.Printf("Rejecting self-proxy request to %s", req.Host)
-		clientConn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
 		return
 	}
 
@@ -145,16 +139,31 @@ func (s *Server) handleHTTPS(clientConn net.Conn, req *http.Request) {
 		return
 	}
 
-	// Start bidirectional copy
+	// Use WaitGroup to track goroutine completion
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Start bidirectional copy with improved error handling
 	go func() {
+		defer wg.Done()
 		_, err := io.Copy(targetConn, clientConn)
-		if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
-			log.Printf("Error copying to target: %v", err)
+		if err != nil {
+			if !strings.Contains(err.Error(), "use of closed network connection") {
+				log.Printf("Error copying to target: %v", err)
+			}
 		}
 	}()
 
-	_, err = io.Copy(clientConn, targetConn)
-	if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
-		log.Printf("Error copying to client: %v", err)
-	}
+	go func() {
+		defer wg.Done()
+		_, err := io.Copy(clientConn, targetConn)
+		if err != nil {
+			if !strings.Contains(err.Error(), "use of closed network connection") {
+				log.Printf("Error copying to client: %v", err)
+			}
+		}
+	}()
+
+	// Wait for both copy operations to complete
+	wg.Wait()
 }

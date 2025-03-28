@@ -69,6 +69,15 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	s.handleHTTP(clientConn, req)
 }
 
+// getTargetAddress returns the target address with appropriate port
+func getTargetAddress(host string) string {
+	if !strings.Contains(host, ":") {
+		// If no port specified, use default HTTP port
+		return host + ":80"
+	}
+	return host
+}
+
 // handleHTTP handles regular HTTP requests
 func (s *Server) handleHTTP(clientConn net.Conn, req *http.Request) {
 	// Ensure the request URL is absolute
@@ -77,8 +86,12 @@ func (s *Server) handleHTTP(clientConn net.Conn, req *http.Request) {
 		req.URL.Host = req.Host
 	}
 
+	// Get target address with port
+	targetAddr := getTargetAddress(req.Host)
+	log.Printf("Connecting to target: %s", targetAddr)
+
 	// Create a connection to the target server
-	targetConn, err := net.Dial("tcp", req.Host)
+	targetConn, err := net.Dial("tcp", targetAddr)
 	if err != nil {
 		log.Printf("Error connecting to target: %v", err)
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
@@ -102,8 +115,15 @@ func (s *Server) handleHTTP(clientConn net.Conn, req *http.Request) {
 
 // handleHTTPS handles HTTPS CONNECT requests
 func (s *Server) handleHTTPS(clientConn net.Conn, req *http.Request) {
+	// Get target address with port (default to 443 for HTTPS)
+	targetAddr := getTargetAddress(req.Host)
+	if !strings.Contains(targetAddr, ":") {
+		targetAddr = targetAddr + ":443"
+	}
+	log.Printf("Connecting to HTTPS target: %s", targetAddr)
+
 	// Connect to the target server
-	targetConn, err := net.Dial("tcp", req.Host)
+	targetConn, err := net.Dial("tcp", targetAddr)
 	if err != nil {
 		log.Printf("Error connecting to target: %v", err)
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
